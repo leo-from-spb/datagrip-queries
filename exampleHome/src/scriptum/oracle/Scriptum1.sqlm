@@ -1,0 +1,1505 @@
+---- RetrieveSessionInfo ----
+select sys_context('userenv', 'current_schema') as current_schema,
+       user as current_user,
+       sys_context('userenv','db_name') as database_name
+from sys.dual
+/
+
+
+---- CheckBaseDictionariesAccess ----
+select 'C' as permission
+from sys.session_roles
+where role = 'SELECT_CATALOG_ROLE'
+union
+select 'D' as permission
+from sys.session_privs
+where privilege = 'SELECT ANY DICTIONARY'
+/
+
+
+---- CheckFastDictionariesAccess ----
+with V1 as (select 0 from sys.obj$ where 1 is null),
+     V2 as (select 0 from sys.type$ where 1 is null),
+     V3 as (select 0 from sys.ind$ where 1 is null),
+     V4 as (select 0 from sys.ts$ where 1 is null),
+     V5 as (select 0 from sys.con$ where 1 is null),
+     V6 as (select 0 from sys.cdef$ where 1 is null),
+     V7 as (select 0 from sys.dependency$ where 1 is null)
+select 1
+from dual
+where not exists (select 1 from V1)
+  and not exists (select 1 from V2)
+  and not exists (select 1 from V3)
+  and not exists (select 1 from V4)
+  and not exists (select 1 from V5)
+  and not exists (select 1 from V6)
+  and not exists (select 1 from V7)
+/
+
+
+---- RetrieveAllSchemas ----
+select id, name
+from ( select user_id as id, username as name from sys.all_users
+       union all
+       select 1 as id, 'PUBLIC' as name from sys.dual )
+order by decode(name, user, 1, 'PUBLIC', 2, sys_context('userenv', 'current_schema'), 3, 4), id
+/
+
+
+---- RetrieveSchemaInfo ----
+with U as ( select nvl(max(user_id), -1) as user_id
+            from #CAT_users
+            where username = :schema_name ),
+     O as ( select min(created) as created_timestamp,
+                   max(last_ddl_time) as modified_timestamp
+            from #CAT_objects
+            where owner = :schema_name )
+select *
+from U, O
+/
+
+---- RetrievePublicSchemaInfo ----
+with U as ( select 1 as user_id from sys.dual ),
+     O as ( select min(created) as created_timestamp,
+                   max(last_ddl_time) as modified_timestamp
+            from #CAT_objects
+            where owner = 'PUBLIC' )
+select *
+from U, O
+/
+
+
+---- RetrieveAllMajorNamesFast ----
+select substr(decode(type#, 2,'TA', 3,'CL', 4,'VI', 6,'SE', 7,'PR', 8,'FU', 9,'PA', 42,'MA', 'ZZ') ||
+              to_char(owner#, 'FM0000000000') || to_char(obj#, 'FM0000000000') ||
+              decode(bitand(flags, 16), 16, 'Y', 'N') || -- is secondary
+              name, 1, #N12: 160 #: 60 #.) as item
+from sys.obj$
+where owner# in ( :[*all_schema_ids] )
+  and type# in (2,3,4,6,7,8,9,42)
+  and name not like 'BIN$%'
+  and name not like 'SYS_IL%$$'
+  and subname is null
+  #INC> and mtime >= :since
+union all
+select decode(T.typecode, 108,'YB', 'YC') ||
+       to_char(O.owner#, 'FM0000000000') || to_char(O.obj#, 'FM0000000000') ||
+       'N' || -- is secondary
+       O.name as item
+from sys.type$ T,
+     sys.obj$ O
+where O.owner# in ( :[*all_schema_ids] )
+  and T.tvoid = O.oid$
+  and T.typecode in (108,122)
+  #V12> and T.package_obj# is null
+  #INC> and O.mtime >= :since
+/
+
+
+---- RetrieveAllMajorNames ----
+select substr(substr(O.object_type,1,2) ||
+               to_char(U.user_id, 'FM0000000000') || to_char(O.object_id, 'FM0000000000') ||
+               O.secondary ||
+               O.object_name, 1, #N12: 160 #: 60 #.) as item
+from #CAT_objects O,
+     #CAT_users U
+where U.user_id in ( :[*all_schema_ids] )
+  and U.username = O.owner
+  and substr(O.object_type,1,2) in ('TA','CL','VI','SE','PR','FU','PA','MA')
+  and O.object_type not like '%BODY'
+  and O.object_name not like 'BIN$%'
+  and O.object_name not like 'SYS_IL%$$'
+  and O.subobject_name is null
+  #INC> and O.last_ddl_time >= :since
+union all
+select decode(T.typecode, 'OBJECT','YB', 'YC') ||
+       to_char(U.user_id, 'FM0000000000') || to_char(O.object_id, 'FM0000000000') ||
+       O.secondary ||
+       T.type_name as item
+from #CAT_users U,
+     #CAT_types T,
+     #CAT_objects O
+where U.user_id in ( :[*all_schema_ids] )
+  and U.username = T.owner
+  and T.type_name = O.object_name
+  and O.object_type = 'TYPE'
+  #INC> and O.last_ddl_time >= :since
+/
+
+
+---- RetrieveAllObjectIdentifiersFast ----
+select /*+all_rows*/ obj#
+from sys.obj$
+where #FRAG: owner# = :schema_id #: owner# in ( :[*all_schema_ids] ) #.
+  and type# between 1 and 42
+  and type# not between 19 and 41
+  and type# != 10 -- NON-EXISTENT
+  and name not like 'BIN$%'
+  and name not like 'SYS_IL%$$'
+  and linkname is null
+/
+
+
+---- RetrieveAllObjectIdentifiers ----
+select object_id
+from #CAT_objects
+where #FRAG: owner = :schema_name #: owner in ( :[*all_schema_names] ) #.
+  and object_type in ( 'SEQUENCE','CLUSTER','TABLE','INDEX','MATERIALIZED VIEW','VIEW',
+                       'TYPE','TYPE BODY','PACKAGE','PACKAGE BODY',
+                       'PROCEDURE','FUNCTION','OPERATOR','TRIGGER','SYNONYM' )
+  and object_name not like 'BIN$%'
+  and object_name not like 'SYS_IL%$$'
+/
+
+
+---- RetrieveStatesFast ----
+select obj# object_id, mtime modified_timestamp
+from sys.obj$
+where obj# in ( :[*object_ids] )
+/
+
+
+---- RetrieveStates ----
+select object_id, last_ddl_time modified_timestamp
+from #CAT_objects
+where object_id in ( :[*object_ids] )
+/
+
+
+---- ListFragmentRegularIds ----
+select substr(substr(O.object_type,1,2) ||
+              to_char(:schema_id, 'FM0000000000') || to_char(O.object_id, 'FM0000000000') ||
+              O.secondary ||
+              O.object_name, 1, 60) as item
+from sys.all_objects O
+where O.owner = :schema_name
+  and O.object_type in ( :[*major_object_type_names] )
+  and O.object_name in ( :[*major_object_names] )
+  and O.object_name not like 'BIN$%'
+  and O.object_name not like 'SYS_IL%$$'
+  and O.subobject_name is null
+/
+
+---- ListFragmentTypeIds ----
+select decode(T.typecode, 'OBJECT','YB', 'YC') ||
+       to_char(:schema_id, 'FM0000000000') || to_char(O.object_id, 'FM0000000000') ||
+       O.secondary ||
+       T.type_name as item
+from sys.all_types T,
+     sys.all_objects O
+where T.owner = :schema_name
+  and T.type_name in ( :[*major_object_names] )
+  and T.type_name = O.object_name
+  and O.object_type = 'TYPE'
+/
+
+
+
+---- RetrieveAllSynonyms ----
+select O.owner as synonym_schema_name,
+       O.object_id as synonym_id,
+       S.synonym_name,
+       O.created as created_timestamp,
+       O.last_ddl_time as modified_timestamp,
+       S.db_link as origin_db_link,
+       S.table_owner as origin_schema_name,
+       S.table_name as origin_object_name
+from #CAT_objects O,
+     #CAT_synonyms S
+where O.object_type = 'SYNONYM'
+  and O.owner in ( :[*all_schema_names] )
+  and O.object_name not like '%/%'
+  #INC> and O.last_ddl_time >= :since
+  and S.owner = O.owner
+  and S.synonym_name = O.object_name
+order by object_id
+/
+
+
+---- RetrieveFragmentSynonyms ----
+select :schema_name as synonym_schema_name,
+       O.object_id as synonym_id,
+       S.synonym_name,
+       O.created as created_timestamp,
+       O.last_ddl_time as modified_timestamp,
+       S.db_link as origin_db_link,
+       S.table_owner as origin_schema_name,
+       S.table_name as origin_object_name
+from #CAT_objects O,
+     #CAT_synonyms S
+where O.object_type = 'SYNONYM'
+  and O.owner = :schema_name
+  and S.owner = :schema_name
+  #FRAG> and O.object_name in ( :[*major_object_names] )
+  and O.object_name not like '%/%'
+  and S.synonym_name = O.object_name
+order by object_id
+/
+
+
+---- RetrieveSequences ----
+select sequence_name, min_value, max_value, increment_by,
+       cycle_flag, order_flag, cache_size, last_number,
+       object_id,
+       #V12> generated,
+       created_timestamp, modified_timestamp
+from ( select sequence_name,
+              min_value,
+              max_value,
+              least(increment_by, 9223372036854775807) as increment_by,
+              decode(cycle_flag, 'Y',1,0) as cycle_flag,
+              decode(order_flag, 'Y',1,0) as order_flag,
+              decode(least(cache_size, 9223372036854775807), 0,-2147483648, 20,null, cache_size) as cache_size,
+              last_number
+       from #CAT_sequences
+       where sequence_owner = :schema_name
+         #FRAG> and sequence_name in ( :[*major_object_names] )
+       )
+     natural join
+     ( select object_name as sequence_name,
+              object_id,
+              #V12> decode(generated, 'Y',1, 0) as generated,
+              created as created_timestamp,
+              last_ddl_time as modified_timestamp
+       from #CAT_objects
+       where owner = :schema_name
+         #INC> and last_ddl_time >= :since
+         #FRAG> and object_name in ( :[*major_object_names] )
+         and object_type = 'SEQUENCE' )
+order by created_timestamp, object_id
+/
+
+
+---- RetrieveObjectTypes ----
+with T as ( select type_name,
+                   supertype_owner as supertype_schema_name, supertype_name,
+                   decode(incomplete, 'YES', 1, 0) as is_incomplete,
+                   decode(final, 'YES', 1, 0) as is_final,
+                   decode(instantiable, 'YES', 1, 0) as is_instantiable
+            from #CAT_types
+            where owner = :schema_name
+              #FRAG> and type_name in ( :[*major_object_names] )
+              and typecode = 'OBJECT' ),
+     S as ( select object_name as type_name,
+                   object_id,
+                   created as created_timestamp, last_ddl_time as modified_timestamp
+            from #CAT_objects
+            where owner = :schema_name
+              #FRAG> and object_name in ( :[*major_object_names] )
+              and object_type = 'TYPE'
+              and subobject_name is null ),
+     B as ( select object_name as body_type_name, object_id as body_object_id,
+                   created as body_created_timestamp, last_ddl_time as body_modified_timestamp
+            from #CAT_objects
+            where owner = :schema_name
+              #FRAG> and object_name in ( :[*major_object_names] )
+              and object_type = 'TYPE BODY' )
+select type_name, supertype_schema_name, supertype_name,
+       is_incomplete, is_final, is_instantiable,
+       object_id, created_timestamp, modified_timestamp,
+       body_object_id, body_created_timestamp, body_modified_timestamp
+from T natural join S
+       left outer join B on type_name = body_type_name
+#INC> where greatest(modified_timestamp, nvl(body_modified_timestamp,modified_timestamp)) >= :since
+order by created_timestamp, object_id
+/
+
+
+---- RetrieveCollectionTypes ----
+select object_id, type_name, collection_kind, -- mandatory,
+       data_type_schema_name, data_type, data_size, data_scale, data_size_units, upper_bound,
+       created_timestamp, modified_timestamp
+from (
+       select type_name,
+              case when coll_type like '%ARRAY%' then 'A' else 'T' end as collection_kind,
+              upper_bound,
+              elem_type_owner as data_type_schema_name,
+              case when character_set_name like 'NCHAR%' and elem_type_name in ('CHAR','VARCHAR2','CLOB')
+                                 then 'N'||elem_type_name
+                                 else elem_type_name
+                                 end as data_type,
+              case when elem_type_name in ('NUMBER','FLOAT') then precision
+                   when elem_type_name like '%CHAR%' then length
+                   when elem_type_name like '%RAW' then length
+                   else null
+                   end as data_size,
+              scale as data_scale,
+              case when elem_type_name in ('NUMBER','FLOAT') then 'D'
+                   when elem_type_name like '%N%CHAR%' then 'C'
+                   when elem_type_name like '%CHAR%' then 'B'
+                   when elem_type_name like '%RAW' then 'B'
+                   when elem_type_name like 'TIMESTAMP' then 'D'
+                   else null
+                   end as data_size_units,
+              decode(nulls_stored, 'YES', 0, 1) as mandatory
+       from #CAT_coll_types
+       where owner = :schema_name
+         #FRAG> and type_name in ( :[*major_object_names] )
+     )
+     natural join
+     (
+       select object_id, object_name as type_name,
+              created as created_timestamp, last_ddl_time as modified_timestamp
+       from #CAT_objects
+       where owner = :schema_name
+         #INC> and last_ddl_time >= :since
+         #FRAG> and object_name in ( :[*major_object_names] )
+         and object_type = 'TYPE'
+         and subobject_name is null
+     )
+order by created_timestamp, object_id
+/
+
+
+---- RetrieveObjectTypeAttributes ----
+with my_objects as ( select object_name
+                     from #CAT_objects
+                     where owner = :schema_name
+                       #INC> and last_ddl_time >= :since
+                       #FRAG> and object_name in ( :[*major_object_names] )
+                       and object_type = 'TYPE' )
+select type_name,
+       attr_no as position,
+       attr_name,
+       attr_type_owner as data_type_schema,
+       attr_type_name as data_type,
+       case when attr_type_name in ('NUMBER','FLOAT') then nvl(precision,-1)
+          when attr_type_name like '%RAW' then nvl(length,-1)
+          else -1
+          end as data_size,
+       scale as data_scale,
+       case when attr_type_name in ('NUMBER','FLOAT') then 'D'
+          when attr_type_name like '%N%CHAR%' then 'C'
+          when attr_type_name like '%CHAR%' then 'B'
+          when attr_type_name like '%RAW' then 'B'
+          when attr_type_name like 'TIMESTAMP' then 'D'
+          else null
+          end as data_size_units
+from #CAT_type_attrs A,
+     my_objects O
+where A.owner = :schema_name
+  #FRAG> and type_name in ( :[*major_object_names] )
+  and A.type_name = O.object_name
+  and A.inherited = 'NO'
+order by owner, type_name, attr_no
+/
+
+
+---- RetrieveClusters ----
+select O.object_id as id,
+       substr(C.cluster_type,1,1) as type_code,
+       decode(substr(trim(C.single_table),1,1),'Y',1,0) as single_table,
+       C.key_size as block_size,
+       C.hashkeys as hash_cardinality,
+       E.hash_expression,
+       C.tablespace_name,
+       cast(substr(dbms_metadata.get_ddl('CLUSTER', C.cluster_name, :schema_name), 1, 1000) as varchar(1000)) as decompiled_text
+from #CAT_objects O
+     inner join #CAT_clusters C
+         on O.owner = C.owner and O.object_name = C.cluster_name
+     left outer join #CAT_cluster_hash_expressions E
+         on C.owner = E.owner and C.cluster_name = E.cluster_name
+where O.owner = :schema_name
+      #INC> and O.last_ddl_time >= :since
+      #FRAG> and O.object_name in ( :[*major_object_names] )
+      and O.object_type = 'CLUSTER'
+order by id
+/
+
+---- RetrieveClustersWhenNoPermissions ----
+select O.object_id as id,
+       substr(C.cluster_type,1,1) as type_code,
+       decode(substr(trim(C.single_table),1,1),'Y',1,0) as single_table,
+       C.key_size as block_size,
+       C.hashkeys as hash_cardinality,
+       E.hash_expression,
+       C.tablespace_name
+from #CAT_objects O
+     left join #CAT_clusters C
+         on O.owner = C.owner and O.object_name = C.cluster_name
+     left outer join #CAT_cluster_hash_expressions E
+         on C.owner = E.owner and C.cluster_name = E.cluster_name
+where O.owner = :schema_name
+      #INC> and O.last_ddl_time >= :since
+      #FRAG> and O.object_name in ( :[*major_object_names] )
+      and O.object_type = 'CLUSTER'
+/
+
+
+---- RetrieveTables ----
+with HL as ( select master as table_name, 1 as has_mat_log
+             from #CAT_mview_logs
+             where log_owner = :schema_name ),
+     ML as ( select log_table as table_name, 1 as is_mat_log, master as master_table_name
+             from #CAT_mview_logs
+             where log_owner = :schema_name ),
+     MV as ( select mview_name as mat_view_name, 1 as is_mat_view
+             from #CAT_mviews
+             where owner = :schema_name )
+--
+select table_name, organization_kind, is_temp, is_temp_preserved,
+       null as row_type_schema_name, null as row_type_name,
+       cluster_name, master_table_name,
+       has_mat_log, is_mat_log, is_mat_view,
+       object_id, surrogate, created_timestamp, modified_timestamp
+from
+  (
+  select T.table_name,
+         case when T.iot_type is not null then 'I'
+              when T.cluster_name is not null then 'C'
+              else null end as organization_kind,
+         decode(T.temporary, 'Y',1, 0) as is_temp,
+         decode(instr(T.duration,'SESSION'), 0,0, 1) as is_temp_preserved,
+         T.cluster_name, ML.master_table_name,
+         HL.has_mat_log, ML.is_mat_log, MV.is_mat_view
+  from #CAT_tables T
+       left outer join HL on T.table_name = HL.table_name
+       left outer join ML on T.table_name = ML.table_name
+       left outer join MV on T.table_name = MV.mat_view_name
+  where T.owner = :schema_name
+    #V10> and T.dropped = 'NO'
+    and T.secondary = 'N'
+    and T.iot_name is null
+  )
+  natural join
+  (
+  select object_name as table_name,
+         object_id, decode(generated, 'Y', 1, 0) as surrogate,
+         created as created_timestamp, last_ddl_time as modified_timestamp
+  from #CAT_objects
+  where owner = :schema_name
+    #INC> and last_ddl_time >= :since
+    #FRAG> and object_name in ( :[*major_object_names] )
+    and object_type = 'TABLE'
+  )
+--
+union all
+--
+select table_name, organization_kind, is_temp, is_temp_preserved,
+       row_type_schema_name, row_type_name,
+       cluster_name, cast(null as varchar(30)) as master_table_name,
+       has_mat_log,
+       cast(0 as number(1)) as is_mat_log,
+       cast(0 as number(1)) as is_mat_view,
+       object_id, surrogate, created_timestamp, modified_timestamp
+from
+  (
+  select B.table_name,
+         case when B.iot_type is not null then 'I'
+              when B.cluster_name is not null then 'C'
+              else null end as organization_kind,
+         decode(B.temporary, 'Y',1, 0) as is_temp,
+         decode(instr(B.duration,'SESSION'), 0,0, 1) as is_temp_preserved,
+         B.table_type_owner as row_type_schema_name,
+         B.table_type as row_type_name,
+         B.cluster_name,
+         HL.has_mat_log
+  from #CAT_object_tables B
+       left outer join HL on B.table_name = HL.table_name
+  where owner = :schema_name
+    #V10> and B.dropped = 'NO'
+    and B.secondary = 'N'
+    and B.iot_name is null
+  )
+  natural join
+  (
+  select object_name as table_name,
+         object_id, decode(generated, 'Y', 1, 0) as surrogate,
+         created as created_timestamp, last_ddl_time as modified_timestamp
+  from #CAT_objects
+  where owner = :schema_name
+    #INC> and last_ddl_time >= :since
+    #FRAG> and object_name in ( :[*major_object_names] )
+    and object_type = 'TABLE'
+  )
+--
+order by created_timestamp, object_id
+/
+
+
+---- RetrieveMatLogs ----
+select master as table_name,
+       log_table as log_name,
+       decode(rowids, 'YES',1, 0) as with_rowid,
+       decode(object_id, 'YES',1, 0) as with_object_id,
+       decode(primary_key, 'YES',1, 0) as with_primary_key,
+       decode(sequence, 'YES',1, 0) as with_sequence,
+       decode(include_new_values, 'YES',1, 0) as with_new_values
+from #CAT_mview_logs
+where log_owner = :schema_name
+  #FRAG> and (master in ( :[*major_object_names] ) or log_table in ( :[*major_object_names] ))
+/
+
+
+---- RetrieveMatViews ----
+select view_name, object_id, text_length,
+       prebuilt, modifiable,
+       refresh_method, refresh_mode,
+       is_invalid,
+       created_timestamp, modified_timestamp
+from
+  (
+  select mview_name as view_name, query_len as text_length,
+         decode(build_mode, 'PREBUILT',1, 0) as prebuilt,
+         decode(updatable, 'N', 0, 1) as modifiable,
+         decode(refresh_method, 'FORCE', 'E', substr(refresh_method, 1, 1)) as refresh_method,
+         substr(refresh_mode, 1, 1) as refresh_mode
+  from #CAT_mviews
+  where owner = :schema_name
+  )
+  natural join
+  (
+  select object_name as view_name,
+         object_id, decode(status, 'INVALID', 1, 0) as is_invalid,
+         created as created_timestamp, last_ddl_time as modified_timestamp
+  from #CAT_objects
+  where owner = :schema_name
+    #INC> and last_ddl_time >= :since
+    #FRAG> and object_name in ( :[*major_object_names] )
+    and object_type = 'MATERIALIZED VIEW'
+  )
+order by created_timestamp, object_id
+/
+
+
+---- RetrieveViews ----
+select view_name, object_id, text_length,
+       modifiable, is_invalid,
+       created_timestamp, modified_timestamp
+from
+  (
+  select view_name, text_length,
+         #V11: decode(read_only, 'N', 1, 0) #: to_number(null) #. as modifiable
+  from #CAT_views
+  where owner = :schema_name
+  )
+  natural join
+  (
+  select object_name as view_name,
+         object_id, decode(status, 'INVALID', 1, 0) as is_invalid,
+         created as created_timestamp, last_ddl_time as modified_timestamp
+  from #CAT_objects
+  where owner = :schema_name
+    #INC> and last_ddl_time >= :since
+    #FRAG> and object_name in ( :[*major_object_names] )
+    and object_type = 'VIEW'
+  )
+order by created_timestamp, object_id
+/
+
+
+---- RetrieveColumns ----
+with my_objects as ( select object_id, object_name,
+                            substr(object_type,1,1) as major_kind
+                     from #CAT_objects
+                     where owner = :schema_name
+                       #INC> and last_ddl_time >= :since
+                       #FRAG> and object_name in ( :[*major_object_names] )
+                       and object_type in ('CLUSTER','TABLE','MATERIALIZED VIEW','VIEW') )
+select major_kind,
+       object_id as major_id,
+       column_id as column_position,
+       column_name,
+       data_type_owner as data_type_schema_name,
+       data_type,
+       case when data_type in ('NUMBER','FLOAT') then nvl(data_precision,2147483646)
+          when data_type like '%CHAR%' then nvl(char_length,-1)
+          when data_type like 'LONG RAW' then -1
+          when data_type like 'RAW' then nvl(data_length,-1)
+          else -1
+          end as data_size,
+       data_scale,
+       case when data_type in ('NUMBER','FLOAT') then 'D'
+          when data_type like '%CHAR%' then C.char_used
+          when data_type like '%RAW' then 'B'
+          when data_type like 'TIMESTAMP' then 'D'
+          else null
+          end as data_size_units,
+       decode(nullable, 'N', 1, 0) as mandatory,
+       #V12> decode(identity_column, 'YES',1, 0) as identity_column,
+       #V12> decode(default_on_null, 'YES',1, 0) as default_on_null,
+       default_length as default_expression_length
+from my_objects T,
+     #CAT_tab_columns C
+where C.owner = :schema_name
+  and C.table_name = T.object_name
+order by object_id, column_id
+/
+
+
+---- RetrieveColumnDefaultsXml ----
+select dbms_xmlGen.newContext(q'{
+                select table_name   as "_:major_name:_",
+                       column_name  as "_:minor_name:_",
+                       data_default as "_:content_text:_"
+                from #CAT_tab_columns
+                where owner = #[schema_name_lit]
+                  and table_name in ( #[names_lit] )
+                  and default_length between 1 and 4000
+           }') as text
+from dual
+/
+
+
+---- RetrieveColumnDefaultsLong ----
+select table_name as major_name,
+       column_name as minor_name,
+       data_default as text
+from #CAT_tab_columns
+where owner = :schema_name
+  and table_name in ( #[names_lit] )
+  and default_length > 0
+/
+
+
+---- RetrieveClusterIndicesFast ----
+select C.name as cluster_name, O.name as index_name, O.obj# as index_id,
+       T.name as tablespace_name,
+       O.ctime as created_timestamp, O.mtime as modified_timestamp
+from sys.ind$ I,
+     sys.obj$ O,
+     sys.obj$ C,
+     sys.ts$  T
+where O.owner# = :schema_id
+  and O.type# = 1
+  and I.obj# = O.obj#
+  and I.bo# = C.obj#
+  and C.type# = 3
+  #FRAG> and C.name in ( :[*major_object_names] )
+  #INC> and O.mtime >= :since
+  and I.ts# = T.ts# (+)
+/
+
+
+---- RetrieveClusterIndicesUser ----
+select I.table_name as cluster_name, I.index_name, O.object_id as index_id,
+       I.tablespace_name,
+       O.created as created_timestamp, O.last_ddl_time as modified_timestamp
+from sys.user_indexes I,
+     sys.user_objects O
+where I.table_type = 'CLUSTER'
+  and I.index_name = O.object_name
+  and O.object_type = 'INDEX'
+  #FRAG> and I.table_name in ( :[*major_object_names] )
+  #INC> and O.last_ddl_time >= :since
+  and I.table_name not like 'BIN$%'
+/
+
+
+---- RetrieveTableClusterColumnsDba ----
+select C.table_name,
+       C.tab_column_name as column_name
+from sys.dba_clu_columns C, -- table clustering column
+     sys.dba_tab_columns X, -- cluster column is needed for the order
+     sys.dba_objects T      -- table
+where C.owner = :schema_name
+  and X.owner = :schema_name
+  and T.owner = :schema_name
+  and C.table_name = T.object_name
+  and C.cluster_name = X.table_name
+  and C.clu_column_name = X.column_name
+  #FRAG> and C.table_name in ( :[*major_object_names] )
+  #INC> and T.last_ddl_time >= :since
+  and T.object_name not like 'BIN$%'
+order by C.table_name, X.column_id
+/
+
+
+---- RetrieveTableClusterColumnsUser ----
+select C.table_name,
+       C.tab_column_name as column_name
+from sys.user_clu_columns C, -- table clustering column
+     sys.user_tab_columns X, -- cluster column is needed for the order
+     sys.user_objects T      -- table
+where C.table_name = T.object_name
+  and C.cluster_name = X.table_name
+  and C.clu_column_name = X.column_name
+  #FRAG> and C.table_name in ( :[*major_object_names] )
+  #INC> and T.last_ddl_time >= :since
+  and T.object_name not like 'BIN$%'
+order by C.table_name, X.column_id
+/
+
+
+---- RetrieveIndices ----
+select table_name, index_name,
+       uniqueness, clustering, function_based, bitmap, tablespace_name,
+       object_id, surrogate,
+       created_timestamp, modified_timestamp,
+       indextype_owner, indextype_name
+from ( select table_name,
+              owner as index_schema_name, index_name,
+              decode(uniqueness, 'UNIQUE', 1, 0) as uniqueness,
+              decode(substr(index_type,1,3), 'IOT', 1,0) as clustering,
+              case when index_type like 'FUNCTION%' then 1 else 0 end as function_based,
+              case when index_type like '%BITMAP%' then 1 else 0 end as bitmap,
+              tablespace_name,
+              ityp_owner as indextype_owner,
+              ityp_name as indextype_name
+       from #CAT_indexes
+       where table_owner = :schema_name
+         and table_name not like 'BIN$%'
+         #FRAG> and table_name in ( :[*major_object_names] )
+         and index_name not like 'SYS_IL%$$' )
+     natural join
+     ( select object_name as index_name,
+              object_id, decode(generated, 'Y', 1, 0) as surrogate,
+              created as created_timestamp, last_ddl_time as modified_timestamp
+       from #CAT_objects
+       where owner = :schema_name
+         #INC> and last_ddl_time >= :since
+         and object_type = 'INDEX' )
+order by created_timestamp, object_id
+/
+
+
+---- RetrieveIndicesColumns ----
+with my_indices as (
+  #FULL: select index_name from #CAT_indexes where table_owner = :schema_name
+  #FRAG: select index_name from #CAT_indexes where table_owner = :schema_name and table_name in ( :[*major_object_names] )
+  #INC:  select object_name as index_name from #CAT_objects where owner = :schema_name and last_ddl_time >= :since and object_type = 'INDEX'
+  #. )
+select C.table_name,
+       C.index_owner as index_schema_name,
+       C.index_name,
+       C.column_position,
+       decode(substr(C.descend,1,1), 'D', '-', '+') as direction,
+       C.column_name as item
+from my_indices O,
+     #CAT_ind_columns C
+where C.table_owner = :schema_name
+  and C.index_name = O.index_name
+  and C.table_name not like 'BIN$%'
+  and C.index_name not like 'SYS_IL%$$'
+order by C.table_name, C.index_owner, C.index_name, C.column_position
+/
+
+
+---- RetrieveIndicesExpressions ----
+with my_indices as (
+  #FULL: select index_name from #CAT_indexes where table_owner = :schema_name
+  #FRAG: select index_name from #CAT_indexes where table_owner = :schema_name and table_name in ( :[*major_object_names] )
+  #INC:  select object_name as index_name from #CAT_objects where owner = :schema_name and last_ddl_time >= :since and object_type = 'INDEX'
+  #. )
+select E.table_name,
+       E.index_owner as index_schema_name,
+       E.index_name,
+       E.column_position,
+       decode(substr(C.descend,1,1), 'D', '-', '+') as direction,
+       E.column_expression as item
+from my_indices O,
+     #CAT_ind_columns C,
+     #CAT_ind_expressions E
+where O.index_name not like 'SYS_IL%$$'
+  and E.table_owner = :schema_name
+  and E.table_name not like 'BIN$%'
+  and E.index_name = O.index_name
+  and E.table_owner = C.table_owner
+  and E.table_name = C.table_name
+  and E.index_owner = C.index_owner
+  and E.index_name = C.index_name
+  and E.column_position = C.column_position
+order by E.table_name, E.index_owner, E.index_name, E.column_position
+/
+
+
+---- RetrieveKeys ----
+with my_objects as ( select owner, object_name as table_name
+                     from #CAT_objects
+                     where owner = :schema_name
+                       #INC> and last_ddl_time >= :since
+                       #FRAG> and object_name in ( :[*major_object_names] )
+                       and object_type = 'TABLE'
+                       and object_name not like 'BIN$%' )
+select table_name,
+       constraint_name,
+       decode(substr(generated,1,1), 'G',1,0) as is_surrogate_name,
+       decode(constraint_type,'P',1,0) as is_pk,
+       decode(substr(deferrable,1,1),'D',1,0) as is_deferrable,
+       decode(substr(deferred,1,1),'I',1,0) as is_initially_deferred,
+       nvl(index_owner,owner) as index_schema_name, index_name,
+       last_change as modified_timestamp
+from my_objects
+     natural join
+     #CAT_constraints
+where table_name not like 'BIN$%'
+  and constraint_type in ('P','U')
+  and constraint_name not like 'BIN$%'
+order by constraint_type, last_change
+/
+
+
+---- RetrieveForeignKeysFast ----
+select  CD.obj#                               as table_id,
+        CN.name                               as constraint_name,
+        bitand(CD.defer, 8)                   as is_surrogate_name,
+        RN.owner#                             as ref_schema_id,
+        RT.name                               as ref_table_name,
+        RN.name                               as ref_key_name,
+        decode(CD.refact, 1,'C', 2,'N', null) as cascade_rule,
+        bitand(CD.defer, 1)                   as is_deferrable,
+        bitand(CD.defer, 2)/2                 as is_initially_deferred,
+        CD.mtime                              as modified_timestamp
+from sys.con$  CN,
+     sys.cdef$ CD,
+     sys.obj$  CT,
+     sys.con$  RN,
+     sys.cdef$ RD,
+     sys.obj$  RT
+where CN.owner# = :schema_id
+  and CN.con# = CD.con#
+  and CD.type# = 4
+  and CN.name not like 'BIN$%'
+  and CD.obj# = CT.obj#
+  and CD.rcon# = RN.con#
+  and RN.con# = RD.con#
+  and RD.type# between 2 and 3
+  and RD.obj# = RT.obj#
+  #INC> and CT.mtime >= :since
+  #FRAG> and CT.name in ( :[*major_object_names] )
+/
+
+
+---- RetrieveForeignKeys ----
+with my_tables as ( select owner, object_id as table_id, object_name as table_name
+                    from #CAT_objects
+                    where owner = :schema_name
+                      #INC> and last_ddl_time >= :since
+                      #FRAG> and object_name in ( :[*major_object_names] )
+                      and object_type = 'TABLE'
+                      and object_name not like 'BIN$%' ),
+     my_foreign_keys as ( select table_name, constraint_name, generated,
+                                 r_owner as ref_schema_name, r_constraint_name as ref_key_name,
+                                 delete_rule, deferrable, deferred,
+                                 last_change
+                          from #CAT_constraints
+                          where owner = :schema_name
+                            #FRAG> and table_name in ( :[*major_object_names] )
+                            and table_name not like 'BIN$%'
+                            and constraint_type = 'R'
+                            and constraint_name not like 'BIN$%' ),
+     my_ref_keys as ( select owner as ref_schema_name,
+                             table_name as ref_table_name,
+                             constraint_name as ref_key_name
+                      from #CAT_constraints
+                      where constraint_type in ('P','U')
+                        and constraint_name not like 'BIN$%' )
+select T.table_id, F.constraint_name,
+       decode(substr(generated,1,1), 'G',1,0) as is_surrogate_name,
+       R.ref_schema_name,
+       R.ref_table_name,
+       R.ref_key_name,
+       decode(substr(delete_rule,1,1), 'C','C', 'S','N', null)  as cascade_rule,
+       decode(substr(deferrable,1,1),'D',1,0) as is_deferrable,
+       decode(substr(deferred,1,1),'D',1,0) as is_initially_deferred,
+       last_change as modified_timestamp
+from my_tables T
+     join my_foreign_keys F on T.table_name = F.table_name
+     join my_ref_keys R on F.ref_schema_name = R.ref_schema_name and F.ref_key_name = R.ref_key_name
+/
+
+
+---- RetrieveChecks ----
+with my_objects as ( select owner, object_name as table_name
+                     from #CAT_objects
+                     where owner = :schema_name
+                       #INC> and last_ddl_time >= :since
+                       #FRAG> and object_name in ( :[*major_object_names] )
+                       and object_type = 'TABLE'
+                       and object_name not like 'BIN$%' )
+select table_name, constraint_name,
+       decode(substr(generated,1,1), 'G',1,0) as is_surrogate_name,
+       decode(substr(deferrable,1,1),'D',1,0) as is_deferrable,
+       decode(substr(deferred,1,1),'I',1,0) as is_initially_deferred,
+       last_change as modified_timestamp
+from my_objects
+     natural join
+     #CAT_constraints
+where table_name not like 'BIN$%'
+  and constraint_type = 'C'
+  and search_condition is not null
+/
+
+
+---- RetrieveCheckPredicatesXml ----
+select dbms_xmlGen.newContext(q'{
+                select table_name       as "_:major_name:_",
+                       constraint_name  as "_:minor_name:_",
+                       search_condition as "_:content_text:_"
+                from #CAT_constraints
+                where owner = #[schema_name_lit]
+                  and table_name in ( #[names_lit] )
+                  and constraint_type = 'C'
+                  and search_condition is not null
+           }') as text
+from dual
+/
+
+
+---- RetrieveCheckPredicates12 ----
+select table_name as major_name,
+       constraint_name as minor_name,
+       search_condition_vc as text
+from #CAT_constraints
+where owner = :schema_name
+  and table_name in ( :[*names] )
+  and constraint_type = 'C'
+  and search_condition_vc is not null
+/
+
+
+---- RetrieveCheckPredicatesLong ----
+select table_name as major_name,
+       constraint_name as minor_name,
+       search_condition as text
+from #CAT_constraints
+where owner = :schema_name
+  and table_name in ( :[*names] )
+  and constraint_type = 'C'
+  and search_condition is not null
+/
+
+
+---- RetrieveConstraintColumns ----
+with my_objects as ( select object_name as table_name
+                     from #CAT_objects
+                     where owner = :schema_name
+                       #INC> and last_ddl_time >= :since
+                       #FRAG> and object_name in ( :[*major_object_names] )
+                       and object_type = 'TABLE'
+                       and object_name not like 'BIN$%' )
+select table_name, constraint_name,
+       nvl(position,1) as column_position, column_name
+from my_objects
+     natural join
+     #CAT_cons_columns
+where owner = :schema_name
+  and table_name not like 'BIN$%'
+  and constraint_name not like 'BIN$%'
+order by 1,2,3,4
+/
+
+
+---- RetrieveTriggers ----
+select table_name,
+       trigger_name,
+       trigger_id,
+       decode(substr(turn,1,1), 'B',-1, 'A',+1, 0) *
+           (case when turn like '%STAT%' then 2 else 1 end) as turn,
+       cast ( case when events like '%INSERT%' then 'I' else '' end
+           || case when events like '%UPDATE%' then 'U' else '' end
+           || case when events like '%DELETE%' then 'D' else '' end as varchar(3)) as events,
+       case when lower(trigger_description) like '%update of%' then 1 else 0 end as has_on_update_columns,
+       referencing_names,
+       condition,
+       action_type,
+       created_timestamp,
+       modified_timestamp
+from ( select table_name,
+              owner as trigger_schema_name,
+              trigger_name,
+              trigger_type as turn,
+              triggering_event as events,
+              when_clause as condition,
+              action_type,
+              description as trigger_description,
+              decode(referencing_names, 'REFERENCING NEW AS NEW OLD AS OLD', null, referencing_names) as referencing_names,
+              trigger_body
+       from #CAT_triggers
+       where table_owner = :schema_name
+         #FRAG> and table_name in ( :[*major_object_names] )
+         and table_name not like 'BIN$%' )
+     natural join
+     ( select object_name as trigger_name,
+              object_id as trigger_id,
+              status,
+              created as created_timestamp,
+              last_ddl_time as modified_timestamp
+       from #CAT_objects
+       where owner = :schema_name
+         #INC> and last_ddl_time >= :since
+         and object_type = 'TRIGGER' )
+order by created_timestamp, trigger_id
+/
+
+
+---- RetrieveTriggerUpdateColumns ----
+select table_name,
+       trigger_name,
+       column_name
+from ( select table_name,
+              trigger_owner as trigger_schema_name,
+              trigger_name,
+              column_name
+       from #CAT_trigger_cols
+       where table_owner = :schema_name
+         #FRAG> and table_name in ( :[*major_object_names] )
+         and table_name not like 'BIN$%'
+         and column_list = 'YES' )
+     natural join
+     ( select object_name as trigger_name
+       from #CAT_objects
+       where owner = :schema_name
+         #INC> and last_ddl_time >= :since
+         and object_type = 'TRIGGER' )
+     natural join
+     ( select table_name,
+              column_name,
+              column_id
+       from #CAT_tab_columns
+       where owner = :schema_name )
+order by table_name, column_id
+/
+
+
+---- RetrievePackages ----
+select object_id,
+       object_name as package_name,
+       decode(object_type, 'PACKAGE BODY', 1, 0) as is_body,
+       decode(status, 'INVALID', 1, 0) as is_invalid,
+       created as created_timestamp, last_ddl_time as modified_timestamp
+from #CAT_objects
+where owner = :schema_name
+  #INC> and last_ddl_time >= :since
+  #FRAG> and object_name in ( :[*major_object_names] )
+  and object_type like 'PACKAGE%'
+order by object_type, created, object_id
+/
+
+
+---- RetrieveInnerRoutines11 ----
+with my_objects as ( select A.object_name,
+                            substr(A.object_type,1,1) as module_kind
+                     from #CAT_objects A,
+                          #CAT_objects B
+                     where A.owner = :schema_name
+                       #FRAG> and A.object_name in ( :[*major_object_names] )
+                       #INC> and greatest(A.last_ddl_time, nvl(B.last_ddl_time,A.last_ddl_time)) >= :since
+                       and A.object_type in ('TYPE','PACKAGE')
+                       and A.owner = B.owner (+)
+                       and A.object_name = B.object_name (+)
+                       and A.object_type||' BODY' = B.object_type (+) )
+select module_kind,
+       P.object_name as module_name,
+       subprogram_id as position,
+       procedure_name as routine_name,
+       overload as overload_nr,
+       decode(deterministic, 'YES', 1, 0) as is_deterministic
+from my_objects O,
+     #CAT_procedures P
+where P.owner = :schema_name
+  and P.object_name = O.object_name
+  and procedure_name is not null
+order by object_id, subprogram_id, overload_nr
+/
+
+
+---- RetrieveInnerRoutines10 ----
+with my_objects as ( select A.object_name,
+                            substr(A.object_type,1,1) as module_kind
+                     from #CAT_objects A,
+                          #CAT_objects B
+                     where A.owner = :schema_name
+                       #FRAG> and A.object_name in ( :[*major_object_names] )
+                       #INC> and greatest(A.last_ddl_time, nvl(B.last_ddl_time,A.last_ddl_time)) >= :since
+                       and A.object_type in ('TYPE','PACKAGE')
+                       and A.owner = B.owner (+)
+                       and A.object_name = B.object_name (+)
+                       and A.object_type||' BODY' = B.object_type (+) )
+select distinct module_kind,
+                P.object_name as module_name,
+                P.procedure_name as routine_name,
+                G.overload as overload_nr,
+                decode(P.deterministic, 'YES', 1, 0) as is_deterministic
+from my_objects O,
+     #CAT_procedures P,
+     sys.all_arguments G  -- dba_arguments doesn't exist
+where P.owner = :schema_name
+  and P.object_name = O.object_name
+  and G.owner = P.owner
+  and G.object_name = P.procedure_name
+  and G.package_name = P.object_name
+  and procedure_name is not null
+/
+
+
+---- RetrieveInnerRoutineArguments ----
+with my_objects as ( select A.object_name as package_name,
+                            substr(A.object_type,1,1) as module_kind
+                     from #CAT_objects A,
+                          #CAT_objects B
+                     where A.owner = :schema_name
+                       #FRAG> and A.object_name in ( :[*major_object_names] )
+                       #INC> and greatest(A.last_ddl_time, nvl(B.last_ddl_time,A.last_ddl_time)) >= :since
+                       and A.object_type in ('TYPE','PACKAGE')
+                       and A.owner = B.owner (+)
+                       and A.object_name = B.object_name (+)
+                       and A.object_type||' BODY' = B.object_type (+) )
+select package_name,
+       object_name as routine_name,
+       overload as overload_nr,
+       position,
+       argument_name as arg_name,
+       case when in_out = 'OUT' and position = 0 and argument_name is null then 'R'
+            when in_out = 'IN/OUT' then 'M'
+            when in_out = 'IN' and argument_name = 'SELF' and data_type = 'OBJECT' then 'S'
+            else substr(in_out,1,1) end as arg_direction,
+       type_owner as data_type_schema_name,
+       case when type_subname is not null then type_name else null end as data_type_package_name,
+       case when type_subname is not null then type_subname else nvl(type_name, data_type) end as data_type
+from sys.all_arguments -- dba_arguments doesn't exist
+     natural join
+     my_objects
+where not (argument_name is null and sequence = 0)
+order by object_id, overload_nr, #V11:subprogram_id,#. position
+/
+
+
+---- RetrieveSingleRoutines ----
+select O.name, kind, is_invalid, object_id, is_deterministic,
+       created_timestamp, modified_timestamp
+from (  select object_name as name,
+               substr(object_type,1,1) as kind,
+               decode(status, 'INVALID', 1, 0) as is_invalid,
+               object_id,
+               created as created_timestamp, last_ddl_time as modified_timestamp
+        from #CAT_objects
+        where owner = :schema_name
+          #INC> and last_ddl_time >= :since
+          #FRAG> and object_name in ( :[*major_object_names] )
+          and object_type in ('FUNCTION','PROCEDURE') ) O
+     left outer join
+     (  select object_name as name,
+               decode(deterministic, 'YES', 1, 0) as is_deterministic
+        from #CAT_procedures
+        where owner = :schema_name
+          #FRAG> and object_name in ( :[*major_object_names] )
+          and procedure_name is null ) P
+     on O.name = P.name
+order by created_timestamp, object_id
+/
+
+
+---- RetrieveSingleRoutineArguments ----
+with my_objects as ( select owner, object_name
+                     from #CAT_objects
+                     where owner = :schema_name
+                       #INC> and last_ddl_time >= :since
+                       #FRAG> and object_name in ( :[*major_object_names] )
+                       and object_type in ('FUNCTION','PROCEDURE') )
+select object_name as routine_name,
+       position,
+       argument_name as arg_name,
+       case when in_out = 'OUT' and position = 0 and argument_name is null then 'R'
+            when in_out = 'IN/OUT' then 'M'
+            when in_out = 'IN' and argument_name = 'SELF' and data_type = 'OBJECT' then 'S'
+            else substr(in_out,1,1) end as arg_direction,
+       type_owner as data_type_schema_name,
+       case when type_subname is not null then type_name else null end as data_type_package_name,
+       case when type_subname is not null then type_subname else nvl(type_name, data_type) end as data_type
+from my_objects
+     natural join
+     sys.all_arguments
+where package_name is null
+  and not (argument_name is null and sequence = 0)
+order by object_id, #V11:subprogram_id,#. position
+/
+
+
+---- CalculateDbLinksHash ----
+with L as ( select db_link||'|'||username||'|'||host||'|'||created as S
+            from #CAT_db_links
+            where owner = :schema_name )
+select sum(dbms_utility.get_hash_value(S, 1, 1073741824))
+from L
+/
+
+
+---- RetrieveDbLinks ----
+select db_link as name,
+       host as remote_db,
+       username as connect_user_name,
+       created as created_timestamp
+from #CAT_db_links
+where owner = :schema_name
+      #FRAG> and db_link in ( :[*major_object_names] )
+/
+
+
+---- RetrieveDbLinksWithSrc ----
+select db_link as name,
+       host as remote_db,
+       username as connect_user_name,
+       dbms_metadata.get_ddl('DB_LINK', db_link, owner) as src,
+       created as created_timestamp
+from #CAT_db_links
+where owner = :schema_name
+      #FRAG> and db_link in ( :[*major_object_names] )
+/
+
+
+---- CalculateCommentsHash ----
+with OI as ( select object_name as table_name, object_id
+             from #CAT_objects
+             where owner = :schema_name
+               and object_type in ('TABLE', 'MATERIALIZED VIEW', 'VIEW') ),
+     X1 as ( select sum(object_id * 1007 +
+                        dbms_utility.get_hash_value(comments, 1, 1073741824)) as X
+             from #CAT_tab_comments natural join OI
+             where owner = :schema_name
+               and table_name not like 'BIN$%'
+               and comments is not null ),
+     X2 as ( select sum(object_id * 10007 +
+                        dbms_utility.get_hash_value(column_name,1,1073741824) * 101 +
+                        dbms_utility.get_hash_value(comments,1,1073741824)) as X
+             from #CAT_col_comments natural join OI
+             where owner = :schema_name
+               and table_name not like 'BIN$%'
+               and comments is not null )
+select sum(X) as Hash
+from ( select * from X1
+       union all
+       select * from X2 )
+/
+
+
+---- RetrieveComments ----
+select table_name,
+       cast (null as varchar(30)) as column_name,
+       comments
+from #CAT_tab_comments
+where owner = :schema_name
+  #FRAG> and table_name in ( :[*major_object_names] )
+  and table_name not like 'BIN$%'
+  and table_name not like 'MLOG$%'
+  and comments is not null
+union all
+select table_name,
+       column_name,
+       comments
+from #CAT_col_comments
+where owner = :schema_name
+  #FRAG> and table_name in ( :[*major_object_names] )
+  and table_name not like 'BIN$%'
+  and comments is not null
+/
+
+
+---- RetrieveDependenciesFast ----
+with O1 as ( select obj# as object_id, type# as object_type, name as object_name
+             from sys.obj$
+             where owner# = :schema_id
+               #INC> and mtime >= :since
+               #FRAG> and name in ( :[*major_object_names] )
+               and type# in (4,7,8,9,11,12,13,14,42) ),
+     O2 as ( select obj# as referenced_id, type# as referenced_type, name as referenced_name
+             from sys.obj$
+             where type# not in (0,10,40,41)
+               and not (owner# = 0 and type# = 9 and name = 'STANDARD') ),
+     DE as ( select distinct D_obj# as object_id,
+                             P_obj# as referenced_id
+             from sys.dependency$ )
+select object_id, referenced_id
+from O1 natural join DE natural join O2
+where not (object_name = referenced_name and ((object_type,referenced_type) in ((14,13),(11,9))))
+/
+
+
+---- RetrieveDependenciesSlow ----
+select --+ ALL_ROWS
+       type,
+       name,
+       decode(referenced_owner, owner, '@', referenced_owner) as referenced_schema_name,
+       referenced_type,
+       referenced_name
+from #CAT_dependencies
+where owner = :schema_name
+  and type in ('TYPE', 'TYPE BODY', 'PACKAGE', 'PACKAGE BODY',
+               'PROCEDURE', 'FUNCTION', 'MATERIALIZED VIEW', 'VIEW', 'TRIGGER')
+  #INC> and name in (select object_name from all_objects where owner = :schema_name and last_ddl_time >= :since)
+  and referenced_type not like 'JAVA%'
+  and not (owner = referenced_owner and name = referenced_name and type = referenced_type || ' BODY')
+  and not (referenced_owner = 'SYS' and referenced_type = 'PACKAGE' and referenced_name = 'STANDARD')
+/
+
+
+---- RetrieveDependenciesSlowFrag ----
+select --+ ORDERED LEADING(D)
+       D.type,
+       D.name,
+       decode(D.referenced_owner, D.owner, '@', D.referenced_owner) as referenced_schema_name,
+       O.object_id as referenced_id
+from #CAT_dependencies D,
+     #CAT_objects O
+where D.owner = :schema_name
+  and D.type in ('TYPE', 'TYPE BODY', 'PACKAGE', 'PACKAGE BODY',
+                 'PROCEDURE', 'FUNCTION', 'MATERIALIZED VIEW', 'VIEW', 'TRIGGER')
+  #FRAG> and D.name in ( :[*major_object_names] )
+  and D.referenced_type not like 'JAVA%'
+  and not (D.owner = D.referenced_owner and name = D.referenced_name and type = D.referenced_type || ' BODY')
+  and not (D.referenced_owner = 'SYS' and D.referenced_type = 'PACKAGE' and D.referenced_name = 'STANDARD')
+  and D.referenced_owner = O.owner
+  and D.referenced_type = O.object_type
+  and D.referenced_name = O.object_name
+/
+
+
+---- RetrieveMatViewSourcesXml ----
+select dbms_xmlGen.newContext( q'{
+                select mview_name as "_:major_name:_", query as "_:content_text:_"
+                from #CAT_mviews
+                where owner = #[schema_name_lit]
+                  and mview_name in ( #[names_lit] )
+    }' ) as text
+from dual
+/
+
+
+---- RetrieveMatViewSourcesLong ----
+select mview_name as name, query as text
+from #CAT_mviews
+where owner = :schema_name
+  and mview_name in ( :[*names] )
+/
+
+
+---- RetrieveViewSourcesXml ----
+select dbms_xmlGen.newContext( q'{
+                select view_name as "_:major_name:_", text as "_:content_text:_"
+                from #CAT_views
+                where owner = #[schema_name_lit]
+                  and view_name in ( #[names_lit] )
+    }' ) as text
+from dual
+/
+
+
+---- RetrieveViewSources12 ----
+select view_name as name, text_vc as text
+from #CAT_views
+where owner = :schema_name
+  and view_name in ( :[*names] )
+/
+
+
+---- RetrieveViewSourcesLong ----
+select view_name as name, text
+from #CAT_views
+where owner = :schema_name
+  and view_name in ( :[*names] )
+/
+
+
+---- RetrieveTriggerSourcesXml ----
+select dbms_xmlGen.newContext( q'{
+              select table_name as "_:major_name:_",
+                     trigger_name as "_:minor_name:_",
+                     trigger_body as "_:content_text:_"
+              from all_triggers
+              where owner = #[schema_name_lit]
+                and table_name in ( #[names_lit] )
+    }' ) as text
+from dual
+/
+
+
+---- RetrieveTriggerSourcesLong ----
+select table_name as "majorName",
+       trigger_name as "minorName",
+       trigger_body as text
+from all_triggers
+where owner = :schema_name
+  and table_name in ( :[*names] )
+/
+
+
+---- ListSourceNames ----
+select distinct object_name as name
+from #CAT_objects
+where owner = :schema_name
+  #INC> and last_ddl_time >= :src_since
+  and object_type in ('TYPE','TYPE BODY','PACKAGE','PACKAGE BODY','FUNCTION','PROCEDURE')
+minus
+select type_name as name
+from #CAT_types
+where owner = :schema_name
+  and typecode = 'COLLECTION'
+/
+
+
+---- RetrievePortionOfSources ----
+select type, name, text
+from #CAT_source
+where owner = :schema_name
+  and type in ('TYPE','TYPE BODY','PACKAGE','PACKAGE BODY','FUNCTION','PROCEDURE')
+  and name in ( :[*portion_names] )
+order by type, name, line
+/
+
+
+---- ListInvalidObjectsFast ----
+select obj#
+from sys.obj$
+where owner# = :schema_id
+  and status > 1
+  and name not like 'BIN$%'
+/
+
+---- ListInvalidObjects ----
+select object_id
+from #CAT_objects
+where owner = :schema_name
+  and status = 'INVALID'
+  and object_name not like 'BIN$%'
+/
+
+
+---- RetrieveErrors ----
+select name,
+       decode(type, 'PROCEDURE','R', 'TRIGGER','G', substr(type,1,1)) as type_code,
+       decode(instr(type, 'BODY'), 0,0, 1) as is_body,
+       line, position,
+       text as message
+from #CAT_errors
+where owner = :schema_name
+order by name, type, sequence, line, position
+/
+
+
+---- RetrieveDebugInfoPresence ----
+select decode(debugInfo, 'F', -object_id, 'T', +object_id, null) as id
+from sys.all_probe_objects
+where owner = :schema_name
+  #INC> and last_ddl_time >= :src_since
+  #FRAG> and object_name in ( :[*major_object_names] )
+  and object_id > 0
+  and debugInfo in ('F', 'T')
+/
+
+
+---- RetrieveNativeDefinitions ----
+with O as ( select object_id, object_type, owner, object_name
+            from #CAT_objects
+            where object_id in ( :[*identifiers] ) )
+select O.object_id,
+       sys.dbms_metadata.get_ddl(
+          decode(O.object_type,
+                 'TYPE', 'TYPE_SPEC',
+                 'PACKAGE', 'PACKAGE_SPEC',
+                 replace(O.object_type, ' ', '_')),
+          O.object_name,
+          O.owner
+       ) as text,
+       1 as part_order
+from O
+union all
+select O.object_id,
+       sys.dbms_metadata.get_ddl('MATERIALIZED_VIEW_LOG', L.log_table, O.owner) as text,
+       2 as part_order
+from O,
+     #CAT_mview_logs L
+where O.owner = L.log_owner
+  and O.object_name = L.master
+  and O.object_type = 'TABLE'
+order by part_order, object_id
+/

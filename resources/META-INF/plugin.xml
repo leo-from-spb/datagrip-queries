@@ -13,7 +13,8 @@
     <depends>com.intellij.modules.platform</depends>
 
     <extensions defaultExtensionNs="com.intellij">
-        <!-- Add your extensions here -->
+        <fileType name="SQLM" implementationClass="lb.dgq.language.ScriptumLanguageFileType"
+                  fieldName="INSTANCE" language="SQLM" extensions="sqlm"/>
     </extensions>
 
     <actions>
@@ -23,4 +24,5 @@
             <keyboard-shortcut keymap="$default" first-keystroke="shift ctrl alt M"/>
         </action>
     </actions>
+
 </idea-plugin>
