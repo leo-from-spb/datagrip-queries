@@ -1,0 +1,22 @@
+{
+  parserClass="lb.dgq.language.parser.ScriptumParser"
+
+  extends="com.intellij.extapi.psi.ASTWrapperPsiElement"
+
+  psiClassPrefix="Scriptum"
+  psiImplClassSuffix="Impl"
+  psiPackage="lb.dgq.language.psi"
+  psiImplPackage="lb.dgq.language.psi.impl"
+
+  elementTypeHolderClass="lb.dgq.language.psi.ScriptumTypes"
+  elementTypeClass="lb.dgq.language.psi.ScriptumElementType"
+  tokenTypeClass="lb.dgq.language.psi.ScriptumTokenType"
+
+  psiImplUtilClass="lb.dgq.language.psi.impl.ScriptumPsiImplUtil"
+}
+
+scriptumFile ::= item_*
+
+private item_ ::= (property|COMMENT|CRLF)
+
+property ::= (KEY? SEPARATOR VALUE?) | KEY

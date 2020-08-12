@@ -1,3 +1,8 @@
+a = b
+c = d
+e = f
+
+
 ---- RetrieveSessionInfo ----
 select sys_context('userenv', 'current_schema') as current_schema,
        user as current_user,

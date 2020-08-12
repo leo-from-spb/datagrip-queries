@@ -15,6 +15,8 @@
     <extensions defaultExtensionNs="com.intellij">
         <fileType name="SQLM" implementationClass="lb.dgq.language.ScriptumLanguageFileType"
                   fieldName="INSTANCE" language="SQLM" extensions="sqlm"/>
+        <lang.parserDefinition language="SQLM"
+                               implementationClass="lb.dgq.language.parser.ScriptumParserDefinition"/>
     </extensions>
 
     <actions>
